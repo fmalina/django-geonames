@@ -3,7 +3,8 @@ from math import acos, cos, degrees, fabs, pi, radians, sin
 
 from django.conf import settings
 from django.db import models
-from django.db.models import Q
+from django.db.models import Q, F, FloatField, Func, Value
+from django.db.models.functions import Round
 from django.template.defaultfilters import slugify
 
 from geonames.admin2_stopwords import trim_stopwords, admin2_stopwords
@@ -14,55 +15,36 @@ if GIS_LIBRARIES:
     from django.contrib.gis.db import models
     from django.contrib.gis.measure import D
 
-EARTH_R = 3959
-
 
 class GeoManager(models.Manager):
-    def area(self, min_latlon, max_latlon):
-        min_lat, min_lon = min_latlon  # south-west corner (lower left)
-        max_lat, max_lon = max_latlon  # north-east corner
-        return self.filter(lat__gte=min_lat, lon__gte=min_lon)\
-                   .filter(lat__lte=max_lat, lon__lte=max_lon)
-
     def near(self, lat, lon, radius=20, sector='', limit=100, sort=True, prefetch=None):
-        """
-        Lookup using SQL version of the Haversine formula
-        Returns a list, not queryset, due to stitching in distances and sorting
-
-        prefetch - list of fields for prefetch related
-        """
+        """Find objects within a radius using PostGIS distance functions."""
         if not lat:
             return []
-
-        table = self.model._meta.db_table
-        pk = self.model._meta.pk.name
+        bbox = near_places_rough(self.model, lat, lon, miles=radius)
+        distance_field = Func(
+            Func(F('lon'), F('lat'), function='ST_MakePoint'),
+            Value(f'POINT({lon} {lat})', output_field=models.TextField()),
+            function='ST_DistanceSphere',
+            output_field=FloatField()
+        ) / 1609.34  # Convert meters to miles
+        qs = bbox.annotate(distance=Round(distance_field, 1))
         if sector:
-            sector = f'AND sector_id = "{sector}"'
-
-        bbox = near_places_rough(self.model, lat, lon, miles=radius, sql=True)
-        # coords = ST_GeomFromText(CONCAT('POINT(',lat ,' ', lon, ')'), 4326)
-        # ST_Distance_Sphere(coords, ST_GeomFromText('POINT({lat} {lon})', 4326), {EARTH_R} ) AS distance
-
-        qs = self.raw(f"""
-            SELECT {pk},
-              ({EARTH_R} * acos(cos(radians({lat})) * cos(radians(lat)) * cos(radians(lon) - radians({lon}))
-                                + sin(radians({lat})) * sin(radians(lat)))) AS distance
-            FROM {table} WHERE {bbox} lat IS NOT NULL {sector}
-            GROUP BY {pk}
-            HAVING distance < {radius} ORDER BY distance
-            LIMIT {limit}
-        """)
-        pks = [o.pk for o in qs]
-        distances = {o.pk: round(o.distance, 1) for o in qs}
-
-        qs = self.filter(pk__in=pks)
+            qs = qs.filter(sector_id=sector)
+        if not sort and not limit:
+            qs = qs.filter(distance__lt=radius)
         if prefetch:
             qs = qs.prefetch_related(*prefetch)
-        for o in qs:
-            setattr(o, 'distance', distances[o.pk])
         if sort:
-            qs = sorted(list(qs), key=lambda x: x.distance)
-        return qs
+            qs = qs.order_by('distance')
+        return qs[:limit]
+
+    def area(self, min_latlon, max_latlon):
+        """Filters objects within a bounding box defined by min and max latitude/longitude."""
+        min_lat, min_lon = min_latlon  # South-west corner (lower left)
+        max_lat, max_lon = max_latlon  # North-east corner
+        return self.filter(lat__gte=min_lat, lon__gte=min_lon, lat__lte=max_lat, lon__lte=max_lon)
+
 
 
 class BaseManager(GeoManager):
@@ -277,27 +259,21 @@ class Admin2Code(models.Model):
     slug = models.CharField(max_length=35, db_index=True, blank=True, null=True)
 
 
-def near_places_rough(place_type_model, lat, lon, miles, sql=None):
+def near_places_rough(place_type_model, lat, lon, miles):
     """
-    Rough calculation of the places at 'miles' miles of this place.
-    Is rough because calculates a square instead of a circle and the earth
-    is considered as an sphere, but this calculation is fast! And we don't
-    need precision.
+    Rough calculation of places within 'miles' miles of this point.
+    Uses a square bounding box for fast filtering.
     """
-    diff_lat = Decimal(degrees(miles / EARTH_RADIUS_MI))
     lat = Decimal(lat)
     lon = Decimal(lon)
-    max_lat = lat + diff_lat
-    min_lat = lat - diff_lat
+    diff_lat = Decimal(degrees(miles / EARTH_RADIUS_MI))
     diff_long = Decimal(degrees(miles / EARTH_RADIUS_MI / cos(radians(lat))))
-    max_long = lon + diff_long
-    min_long = lon - diff_long
-    if sql:
-        return f"""
-            lat >= {min_lat:.6f} AND lon >= {min_long:.6f} AND
-            lat <= {max_lat:.6f} AND lon <= {max_long:.6f} AND"""
-    return place_type_model.objects.filter(lat__gte=min_lat, lon__gte=min_long)\
-                                   .filter(lat__lte=max_lat, lon__lte=max_long)
+    max_lat  = round(lat + diff_lat, 6)
+    min_lat  = round(lat - diff_lat, 6)
+    max_long = round(lon + diff_long, 6)
+    min_long = round(lon - diff_long, 6)
+    return place_type_model.objects.filter(lat__gte=min_lat, lon__gte=min_long,
+                                           lat__lte=max_lat, lon__lte=max_long)
 
 
 def calc_dist_nogis(la1, lo1, la2, lo2):

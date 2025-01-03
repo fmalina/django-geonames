@@ -12,7 +12,7 @@ from geonames.models import (
 def create_test_town():
     """Small model setup to reuse in model tests of apps that use geonames"""
     gbp = Currency.objects.create(status=1, code='GBP', name="GBP")
-    gb = Country.objects.create(status=1, code='gb', name="GB", currency=gbp)
+    gb = Country.objects.create(status=1, code='GB', name="GB", currency=gbp)
     en = Admin1Code.objects.create(
         geonameid=1, code='en', name='England', country=gb)
     aa = Admin2Code.objects.create(
