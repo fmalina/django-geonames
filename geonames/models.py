@@ -37,7 +37,9 @@ class GeoManager(models.Manager):
             qs = qs.prefetch_related(*prefetch)
         if sort:
             qs = qs.order_by('distance')
-        return qs[:limit]
+        if limit:
+            return qs[:limit]
+        return qs
 
     def area(self, min_latlon, max_latlon):
         """Filters objects within a bounding box defined by min and max latitude/longitude."""
