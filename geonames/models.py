@@ -17,7 +17,7 @@ if GIS_LIBRARIES:
 
 
 class GeoManager(models.Manager):
-    def near(self, lat, lon, radius=20, sector='', limit=100, sort=True, prefetch=None):
+    def near(self, lat, lon, radius=20, sector='', limit=None, sort=True):
         """Find objects within a radius using PostGIS distance functions."""
         if not lat:
             return []
@@ -33,8 +33,8 @@ class GeoManager(models.Manager):
             qs = qs.filter(sector_id=sector)
         if not sort and not limit:
             qs = qs.filter(distance__lt=radius)
-        if prefetch:
-            qs = qs.prefetch_related(*prefetch)
+        if getattr(self.model, 'prefetch'):
+            qs = qs.prefetch_related(*self.model.prefetch)
         if sort:
             qs = qs.order_by('distance')
         if limit:
